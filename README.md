@@ -1,37 +1,52 @@
 # debezium-jdbc-sqlserver-sink
 
-A self-contained, runnable example of **SQL Server → SQL Server replication** using
-[Debezium](https://debezium.io/): a Debezium **SQL Server CDC source** captures
-changes, and the Debezium **JDBC sink** writes them to a second SQL Server —
-including the table's **IDENTITY primary key**, handled natively by the sink's
-`dialect.sqlserver.identity.insert` option (no custom connector required).
+A runnable example of **SQL Server → SQL Server replication on Confluent Cloud**: a
+Debezium **SQL Server CDC source** captures changes, streams them through **Confluent
+Cloud** (Kafka + Schema Registry), and the Debezium **JDBC sink** writes them to a
+second SQL Server — including the table's **IDENTITY primary key**, handled natively
+by the sink's `dialect.sqlserver.identity.insert` option (no custom connector).
 
 📝 Write-up: **https://ohad-israeli.github.io/projects/debezium-jdbc-sqlserver-sink**
 
 ## Architecture
 
 ```
-SourceDB (SQL Server, CDC on)
-   │  Debezium SQL Server source connector
-   ▼
-Kafka topic  sqlserver_source.SourceDB.dbo.TBL_AG_TEST4   (Avro + Schema Registry)
-   │  Debezium JDBC sink connector  (insert.mode=upsert, identity insert ON)
-   ▼
-TargetDB (SQL Server)  →  dbo.TBL_AG_TEST4   (same rows, same identity values)
+On-prem SQL Server (CDC)                Confluent Cloud                 Amazon RDS
+        │                          ┌──────────────────────┐            for SQL Server
+        ▼                          │  Kafka  +  Schema     │                 ▲
+  Kafka Connect (self-managed) ───►│  Registry (Avro)      │──► Kafka Connect ┘
+  Debezium SQL Server source       │  + Cloud Console UI   │    Debezium JDBC sink
+                                    └──────────────────────┘    (identity insert)
 ```
 
-Everything is wired by `docker-compose.yml`. Kafka Connect installs **only** the
-two Debezium connectors (`debezium-connector-sqlserver` and
-`debezium-connector-jdbc`), the Avro converter, and the Microsoft SQL Server JDBC
-driver.
+Kafka, Schema Registry, and the UI all live in **Confluent Cloud**. Only the
+self-managed **Kafka Connect** worker (hosting the two Debezium connectors) and the
+**two SQL Servers** run locally via Docker — the SQL Servers stand in for an
+on-premises source and an Amazon RDS target so you can run the whole thing on a
+laptop. Pointing at a real on-prem source and RDS endpoint is just connection strings.
 
-## Requirements
+## Prerequisites
 
-- Docker + Docker Compose.
-- ~8 GB of RAM free — this runs **two** SQL Server containers plus Kafka, Connect,
-  Schema Registry, and a UI.
-- The Debezium JDBC connector must be **v3.0.7+** for native SQL Server identity
-  insert (the compose pulls `:latest`).
+- Docker + Docker Compose, ~6 GB RAM free (two SQL Server containers + Connect).
+- A **Confluent Cloud** account with:
+  - a Kafka cluster (Basic is fine) → its **bootstrap server** + a **Kafka API key/secret**;
+  - **Schema Registry** enabled (Stream Governance) → its **endpoint URL** + a **Schema Registry API key/secret**.
+
+## Secrets (never committed)
+
+All Confluent Cloud credentials live in a local **`.env`** file, which is
+`.gitignore`d. Copy the template and fill it in:
+
+```bash
+cp .env.example .env
+# edit .env with your CC bootstrap, Kafka API key/secret, SR URL, SR API key/secret
+```
+
+- `docker-compose.yml` reads `.env` to configure the Connect worker (SASL_SSL to CC).
+- The connector configs in `connectors/*.json` reference secrets as
+  `${env:CC_SR_API_KEY}` etc. via Kafka Connect's **env config provider** — so the
+  committed JSON contains *references*, never the secret values, and the secrets are
+  not written into Connect's stored config in plaintext.
 
 ## Run it
 
@@ -39,58 +54,55 @@ driver.
 ./scripts/up.sh
 ```
 
-That brings up the stack, creates the databases (CDC + seed data on the source),
-registers both connectors, and prints the source vs. target rows. First run is slow
-because Connect downloads the connector plugins.
+`up.sh` runs a **preflight** (validates `.env` and checks Schema Registry auth +
+broker reachability), brings up Connect and the two SQL Servers, creates the
+databases (CDC + seed data on the source), registers both connectors, and prints the
+source vs. target rows. The source is seeded with non-contiguous identity values
+(`1, 11, 21, 31, 41`) so it's obvious the exact keys replicate.
 
-Then watch a live change replicate:
+Watch a live change flow through:
 
 ```bash
 docker exec sqlserver-source /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
   -P 'YourPassword123!' -C -d SourceDB \
   -Q "INSERT INTO dbo.TBL_AG_TEST4 (col2,col3,col4,col6,APP_OR_DEB) VALUES (999,GETDATE(),'Live','Type9',1);"
-
 ./scripts/verify.sh
 ```
 
-Tear down (including volumes):
+Inspect topics, schemas, and connector activity in the **Confluent Cloud Console**.
+Tear down with `docker compose down -v`.
 
-```bash
-docker compose down -v
-```
+## The key idea
+
+The source table's primary key is an `IDENTITY` column, which SQL Server normally
+won't let you insert into. The Debezium JDBC sink handles it natively: with
+`"dialect.sqlserver.identity.insert": "true"` it wraps each write batch in
+`SET IDENTITY_INSERT <table> ON/OFF`, so the exact source identity values land in the
+target. Needs Debezium JDBC connector **v3.0.7+**.
 
 ## What's where
 
 | Path | Purpose |
 |------|---------|
-| `docker-compose.yml` | Kafka (KRaft), Schema Registry, Kafka Connect, two SQL Servers, Kafka UI |
-| `connectors/source-sqlserver.json` | Debezium SQL Server CDC source |
+| `docker-compose.yml` | Self-managed Kafka Connect (→ Confluent Cloud) + two SQL Servers |
+| `.env.example` | Template for Confluent Cloud credentials (copy to `.env`) |
+| `connectors/source-sqlserver.json` | Debezium SQL Server CDC source (Avro → CC Schema Registry) |
 | `connectors/sink-jdbc-sqlserver.json` | Debezium JDBC sink (`dialect.sqlserver.identity.insert=true`) |
-| `sql/01-source-setup.sql` | SourceDB + `TBL_AG_TEST4` (IDENTITY PK) + CDC + seed rows |
-| `sql/02-target-setup.sql` | TargetDB + matching empty table |
-| `scripts/up.sh` | One-shot: up → setup DBs → register connectors → verify |
+| `sql/01-source-setup.sql` / `02-target-setup.sql` | Source (CDC + seed) and target tables |
+| `scripts/preflight.sh` | Validate `.env` + Confluent Cloud connectivity |
+| `scripts/up.sh` | One-shot bring-up + verify |
+| `scripts/create-topics.sh` | Optional: pre-create CC topics if auto-create is restricted |
 | `scripts/verify.sh` | Print source vs. target rows |
 
-## The key idea
+## Troubleshooting
 
-The source table's primary key is an `IDENTITY` column. SQL Server normally rejects
-inserts into identity columns, which is what makes "replicate a table including its
-identity PK" awkward. The Debezium JDBC sink solves it natively: with
-`"dialect.sqlserver.identity.insert": "true"` it wraps each write batch in
-`SET IDENTITY_INSERT <table> ON/OFF`, so the exact source identity values land in
-the target. Earlier this required a custom connector — it no longer does.
-
-## Endpoints
-
-- Kafka UI — http://localhost:8080
-- Connect REST — http://localhost:8083/connectors
-- Schema Registry — http://localhost:8081/subjects
-
-## Notes
-
-- Credentials are demo defaults (`sa` / `YourPassword123!`) — for local use only.
-- `schema.evolution` is `none`: the target table must already match the source
-  shape (it does here). Set it to `basic` to let the sink add missing columns.
+- **Connector fails creating internal/data topics** — your API key may lack topic
+  permissions, or auto-create is off. Run `scripts/create-topics.sh` (or create the
+  topics in the Console), and use an API key with topic create/produce/consume rights.
+- **`401`/auth errors to Schema Registry** — the SR API key is separate from the
+  Kafka API key; check `CC_SR_*` in `.env` (preflight will catch this).
+- **`no suitable driver`** — the compose adds the MS SQL JDBC driver to the sink
+  plugin; confirm that download step in `docker compose logs kafka-connect`.
 
 ## License
 
