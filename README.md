@@ -25,6 +25,12 @@ self-managed **Kafka Connect** worker (hosting the two Debezium connectors) and 
 on-premises source and an Amazon RDS target so you can run the whole thing on a
 laptop. Pointing at a real on-prem source and RDS endpoint is just connection strings.
 
+Connect gets its plugins two ways: the **Debezium SQL Server source** and the Avro
+converter are pulled from Confluent Hub at startup, while the **Debezium JDBC sink**
+(which isn't on Confluent Hub) is downloaded from Maven Central into `connect-plugins/`
+by `scripts/prepare-plugins.sh` and mounted into the worker. That archive already
+bundles the Microsoft SQL Server JDBC driver.
+
 ## Prerequisites
 
 - Docker + Docker Compose, ~6 GB RAM free (two SQL Server containers + Connect).
@@ -80,6 +86,16 @@ won't let you insert into. The Debezium JDBC sink handles it natively: with
 `SET IDENTITY_INSERT <table> ON/OFF`, so the exact source identity values land in the
 target. Needs Debezium JDBC connector **v3.0.7+**.
 
+Two details that are easy to miss but essential here:
+
+- The sink's JDBC URL ends with **`;replication=true`**. The identity column is
+  declared `IDENTITY(1,10) NOT FOR REPLICATION`, and SQL Server only honors inserted
+  identity values for such columns when the connection is flagged as a replication
+  connection. Without `replication=true`, SQL Server silently re-generates the
+  identity instead of using the source value.
+- `schema.evolution` is `none`, so the target table must already match the source
+  shape (it does here).
+
 ## What's where
 
 | Path | Purpose |
@@ -90,6 +106,7 @@ target. Needs Debezium JDBC connector **v3.0.7+**.
 | `connectors/sink-jdbc-sqlserver.json` | Debezium JDBC sink (`dialect.sqlserver.identity.insert=true`) |
 | `sql/01-source-setup.sql` / `02-target-setup.sql` | Source (CDC + seed) and target tables |
 | `scripts/preflight.sh` | Validate `.env` + Confluent Cloud connectivity |
+| `scripts/prepare-plugins.sh` | Host-side download of the Debezium JDBC sink (Maven) into `connect-plugins/` |
 | `scripts/up.sh` | One-shot bring-up + verify |
 | `scripts/create-topics.sh` | Optional: pre-create CC topics if auto-create is restricted |
 | `scripts/verify.sh` | Print source vs. target rows |
@@ -101,8 +118,11 @@ target. Needs Debezium JDBC connector **v3.0.7+**.
   topics in the Console), and use an API key with topic create/produce/consume rights.
 - **`401`/auth errors to Schema Registry** — the SR API key is separate from the
   Kafka API key; check `CC_SR_*` in `.env` (preflight will catch this).
-- **`no suitable driver`** — the compose adds the MS SQL JDBC driver to the sink
-  plugin; confirm that download step in `docker compose logs kafka-connect`.
+- **`no suitable driver` / sink plugin not found** — the Debezium JDBC sink lives in
+  `connect-plugins/` (mounted into the worker). Re-run `scripts/prepare-plugins.sh`
+  to (re)download it; the archive bundles the MS SQL driver.
+- **Identity values change in the target** — make sure the sink JDBC URL keeps
+  `;replication=true` (see *The key idea*).
 
 ## License
 

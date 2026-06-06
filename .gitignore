@@ -1,5 +1,8 @@
 # secrets — never commit
 .env
 
+# downloaded connector plugins (fetched by scripts/prepare-plugins.sh)
+connect-plugins/
+
 .DS_Store
 *.log

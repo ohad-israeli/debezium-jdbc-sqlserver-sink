@@ -8,6 +8,9 @@ cd "$ROOT"
 echo "==> Preflight (.env + Confluent Cloud connectivity)"
 "$ROOT/scripts/preflight.sh"
 
+echo "==> Preparing connector plugins (host-side download of the Debezium JDBC sink)..."
+"$ROOT/scripts/prepare-plugins.sh"
+
 echo "==> Starting containers (Kafka Connect + 2 SQL Servers)..."
 docker compose up -d
 

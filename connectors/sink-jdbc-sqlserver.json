@@ -4,7 +4,7 @@
     "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
     "tasks.max": "1",
 
-    "connection.url": "jdbc:sqlserver://sqlserver-target:1433;databaseName=TargetDB;encrypt=false;trustServerCertificate=true",
+    "connection.url": "jdbc:sqlserver://sqlserver-target:1433;databaseName=TargetDB;encrypt=false;trustServerCertificate=true;replication=true",
     "connection.username": "sa",
     "connection.password": "YourPassword123!",
 

@@ -54,7 +54,7 @@ services:
       CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
       CONNECT_CONFIG_PROVIDERS_ENV_PARAM_ALLOWLIST_PATTERN: "CC_.*"
 
-      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components,/usr/local/share/kafka/plugins"
       CONNECT_LOG4J_LOGGERS: org.reflections=ERROR
 
       # secrets exposed to the container so the env provider + schema-history SASL
@@ -65,6 +65,10 @@ services:
       CC_SR_URL: ${CC_SR_URL}
       CC_SR_API_KEY: ${CC_SR_API_KEY}
       CC_SR_API_SECRET: ${CC_SR_API_SECRET}
+    volumes:
+      # Debezium JDBC sink (not on Confluent Hub) — extracted on the host by
+      # scripts/prepare-plugins.sh and mounted onto the Connect plugin path.
+      - ./connect-plugins:/usr/local/share/kafka/plugins
     command:
       - bash
       - -c
@@ -72,14 +76,9 @@ services:
         set -e
         echo "Installing Debezium SQL Server source connector (CDC)..."
         confluent-hub install --no-prompt debezium/debezium-connector-sqlserver:latest
-        echo "Installing Debezium JDBC sink connector..."
-        confluent-hub install --no-prompt debezium/debezium-connector-jdbc:latest
         echo "Installing Avro converter..."
         confluent-hub install --no-prompt confluentinc/kafka-connect-avro-converter:8.2.1
-        echo "Adding the Microsoft SQL Server JDBC driver to the sink plugin..."
-        curl -fsSL -o /usr/share/confluent-hub-components/debezium-debezium-connector-jdbc/lib/mssql-jdbc-12.8.1.jre11.jar \
-          https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.8.1.jre11/mssql-jdbc-12.8.1.jre11.jar
-        echo "Starting Kafka Connect..."
+        echo "Starting Kafka Connect... (Debezium JDBC sink is mounted from ./connect-plugins)"
         /etc/confluent/docker/run
     healthcheck:
       test: curl --fail http://localhost:8083/connectors
